@@ -1,7 +1,7 @@
 
 # coding: utf-8
 
-# In[1]:
+# In[21]:
 
 
 import csv
@@ -10,9 +10,10 @@ import math
 import pprint as pp
 import numpy as np
 import os
+import matplotlib.image as mpimg
 
 
-# In[13]:
+# In[22]:
 
 
 def rfid_info(filename):
@@ -38,10 +39,6 @@ def rfid_info(filename):
 
 def select_useful_rfid(rfid_info):
     return rfid_info['E20038EBB5953DC9B7693E9C']
-
-def rfid_avgs(rfids):
-    avg_rfids_rev = {k: sum([x['peak_rssi'] for x in v]) / len(v) for k, v in rfids.items()}
-    return avg_rfids_rev
 
 def wavelength(freq_mhz):
     return 3 * (10 ** 2) / freq_mhz
@@ -91,7 +88,7 @@ def sanity_check(img_times, tag_times, img2tag):
         print('All good!')
 
 
-# In[14]:
+# In[35]:
 
 
 def bound_data(tag_times, img_times):
@@ -111,15 +108,41 @@ def bound_data(tag_times, img_times):
     
     return tag_start, tag_end, img_start, img_end
     
+class Bucket:
+    def __init__(self):
+        self.tags = []
+        self.imgs = []
+        
+    def add_tag_data(self, tag_dict):
+        impt_info = {"phase_diff": tag_dict["phase_diff"], "time_millis": tag_dict["time_millis"] * 1000}
+        self.tags.append(impt_info)
+        
+    def get_tag_data(self):
+        return self.tags
+    
+    def num_tags(self):
+        return len(self.tags)
+        
+    def add_img_data(self, img_path, time_stamp):
+        img = mpimg.imread(img_path)
+        all_img_data = {"time_millis": time_stamp, "img": img}
+        self.imgs.append(all_img_data)
+    
+    def get_img_data(self):
+        return self.imgs
+    
+    def num_imgs(self):
+        return len(self.imgs)
 
-def bucketize(bucket_size, tag_times, img_times):
+def bucketize(bucket_size, tag_info, img_times, experiment_root):
+    tag_times = [tag_data['time_millis'] for tag_data in tag_info]
     tag_start, tag_end, img_start, img_end = bound_data(tag_times, img_times)
     
     all_buckets_start = min(tag_times[tag_start], img_times[img_start]) - bucket_size / 2
     all_buckets_end = max(tag_times[tag_end], img_times[img_end]) + bucket_size / 2
     num_buckets = math.ceil((all_buckets_end - all_buckets_start) / bucket_size)
     bucket_start_times = [all_buckets_start + bucket_size * i for i in range(0, num_buckets)]
-    buckets = [([], []) for i in range(len(bucket_start_times))] # list of tuples of lists
+    buckets = [Bucket() for i in range(len(bucket_start_times))] # list of tuples of lists
     
     tag_pointer = tag_start
     cur_tag_value = tag_times[tag_pointer]
@@ -128,7 +151,7 @@ def bucketize(bucket_size, tag_times, img_times):
         if not bucket_start_times[bucket_pointer] <= cur_tag_value < bucket_start_times[bucket_pointer + 1]:
             bucket_pointer += 1
             
-        buckets[bucket_pointer][0].append(tag_times[tag_pointer] * 1000)
+        buckets[bucket_pointer].add_tag_data(tag_info[tag_pointer])
         tag_pointer += 1
         cur_tag_value = tag_times[tag_pointer]
 
@@ -138,7 +161,8 @@ def bucketize(bucket_size, tag_times, img_times):
         if not bucket_start_times[bucket_pointer] <= img_times[img_pointer] < bucket_start_times[bucket_pointer + 1]:
             bucket_pointer += 1
             
-        buckets[bucket_pointer][1].append(img_times[img_pointer])
+#         buckets[bucket_pointer][1].append(img_times[img_pointer])
+        buckets[bucket_pointer].add_img_data(os.path.join(experiment_root, 'run_{}.png'.format(img_pointer)), img_times[img_pointer])
         img_pointer += 1
     
     return buckets
@@ -146,10 +170,10 @@ def bucketize(bucket_size, tag_times, img_times):
 def bucket_stats(buckets):
     bucket_sizes = defaultdict(int)
     
-    for tag_bucket, img_bucket in buckets:
-        bucket_sizes[f'tag_size_{len(tag_bucket)}'] += 1
-        bucket_sizes[f'img_size_{len(img_bucket)}'] += 1
-        bucket_sizes[f'all_size_{len(tag_bucket) + len(img_bucket)}'] += 1
+    for bucket in buckets:
+        bucket_sizes[f'tag_size_{bucket.num_tags()}'] += 1
+        bucket_sizes[f'img_size_{bucket.num_imgs()}'] += 1
+        bucket_sizes[f'all_size_{bucket.num_tags() + bucket.num_imgs()}'] += 1
     
     return bucket_sizes
 
@@ -164,7 +188,7 @@ disc1_tag = select_useful_rfid(rfid_data)
 disc_time_data = [tag_data['time_millis'] for tag_data in disc1_tag]
 
 
-# In[15]:
+# In[42]:
 
 
 # We create buckets of the same size across ALL readings and images
@@ -174,6 +198,8 @@ bucket_size = 0.04
 
 for root, dirs, files in os.walk('data/'):
     for experiment_name in dirs:
+        if experiment_name != 'center_away':
+            continue
         experiment_dir = os.path.join(root, experiment_name)
         try:
             rfid_data = rfid_info(os.path.join(experiment_dir, 'tag_data.csv'))
@@ -189,17 +215,19 @@ for root, dirs, files in os.walk('data/'):
             print()
             continue
             
-        disc_tag = select_useful_rfid(rfid_data)
-        disc_time_data = [tag_data['time_millis'] for tag_data in disc_tag]
-        buckets = bucketize(bucket_size, disc_time_data, img_data)
-        for tag_times, img_times in buckets:
-            print(tag_times, img_times)
+        disc_tag_info = select_useful_rfid(rfid_data)
+#         disc_time_data = [tag_data['time_millis'] for tag_data in disc_tag]
+        buckets = bucketize(bucket_size, disc_tag_info, img_data, experiment_dir)
+#         for bucket in buckets:
+#             print(bucket.get_tag_data(), bucket.get_img_data())
         all_stats = bucket_stats(buckets)
 
 #         for stat_name, count in sorted(all_stats.items()):
 #             if not stat_name.startswith('all'):
 #                 print(f'{stat_name}: {count}')
 #         print()
+        
+    break
 
 
 # E20038EBB5953DC9B7693E9C
